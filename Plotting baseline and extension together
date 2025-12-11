@@ -1,0 +1,127 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 1) Load both tables
+baseline = pd.read_csv("agg_baseline_2.csv", sep=";")
+new = pd.read_csv("agg_new_cleaning_additional_cleaning_8.csv", sep=";")
+
+print("Baseline rows:", len(baseline))
+print("New cleaning rows:", len(new))
+
+baseline.columns = baseline.columns.str.strip()
+new.columns = new.columns.str.strip()
+
+print("\nAfter stripping:")
+print("BASELINE:", baseline.columns.tolist())
+print("NEW:", new.columns.tolist())
+
+# Quick sanity check
+print("\n=== BASELINE frac_comp ===")
+print(baseline["frac_comp"].describe())
+print("\n=== NEW frac_comp ===")
+print(new["frac_comp"].describe())
+
+# 2) Sort each table by frac_comp for nice smooth lines
+baseline_sorted = baseline.sort_values("frac_comp").reset_index(drop=True)
+new_sorted = new.sort_values("frac_comp").reset_index(drop=True)
+
+# # 3) Helper to plot one metric
+# def plot_metric(metric_name, ylabel=None):
+#     if ylabel is None:
+#         ylabel = metric_name
+
+#     plt.figure()
+#     plt.plot(
+#         baseline_sorted["frac_comp"], baseline_sorted[metric_name],
+#         "-o", label="Baseline MSMP+", alpha=0.8
+#     )
+#     plt.plot(
+#         new_sorted["frac_comp"], new_sorted[metric_name],
+#         "-o", label="Extended MSMP+", alpha=0.8
+#     )
+#     plt.xlabel("Fraction of comparisons")
+#     plt.ylabel(ylabel)
+#     plt.legend()
+#     plt.tight_layout()
+#     plt.show()
+def plot_metric(metric_name, ylabel=None):
+    if ylabel is None:
+        ylabel = metric_name
+
+    plt.figure()
+
+    # Baseline: solid black with circle markers
+    plt.plot(
+        baseline_sorted["frac_comp"],
+        baseline_sorted[metric_name],
+        color="black",
+        linestyle="-",
+        marker="o",
+        label="Baseline MSMP+",
+        alpha=0.9
+    )
+
+    # Extended: dark grey dashed with square markers
+    plt.plot(
+        new_sorted["frac_comp"],
+        new_sorted[metric_name],
+        color="dimgray",
+        linestyle="--",
+        marker="s",
+        label="Extended MSMP+",
+        alpha=0.9
+    )
+
+    plt.xlabel("Fraction of comparisons")
+    plt.ylabel(ylabel)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+# 4) Plot PQ, PC, F1, F1*
+plot_metric("PQ", "PQ")
+plot_metric("PC", "PC")
+plot_metric("F1", "F1")
+plot_metric("F1_star", "F1*")
+
+# 5) Merge on (r, b) to align configs
+merged = baseline.merge(
+    new,
+    on=["r", "b"],
+    suffixes=["_base", "_new"]
+)
+
+print("\nMerged shape:", merged.shape)
+print(merged.columns)
+
+# Assume merged_sorted is as before
+import matplotlib.pyplot as plt
+
+def auc_trapz(df, x_col, y_col):
+    """Area under curve y(x) using trapezoid rule."""
+    df_sorted = df.sort_values(x_col)
+    x = df_sorted[x_col].values
+    y = df_sorted[y_col].values
+    return np.trapz(y, x)
+
+metrics = ["PQ", "PC", "F1", "F1_star"]
+
+for m in metrics:
+    auc_base = auc_trapz(baseline, "frac_comp", m)
+    auc_new  = auc_trapz(new,       "frac_comp", m)
+    delta    = auc_new - auc_base
+    rel_impr = 100 * delta / auc_base if auc_base != 0 else np.nan
+
+    # NEW: compute and print max values for each metric
+    max_base = baseline[m].max()
+    max_new  = new[m].max()
+
+    print(f"\n=== {m} ===")
+    print(f"AUC baseline       : {auc_base:.6f}")
+    print(f"AUC new            : {auc_new:.6f}")
+    print(f"ΔAUC               : {delta:.6f}")
+    print(f"Rel. change        : {rel_impr:.2f}%")
+    print(f"Max baseline ({m}) : {max_base:.6f}")
+    print(f"Max extended ({m}) : {max_new:.6f}")
