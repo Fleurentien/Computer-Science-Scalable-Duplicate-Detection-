@@ -1,0 +1,1198 @@
+#--------------------- Data preparation ---------------------#
+# Every key has the following numbers in their list
+    #"shop": "bestbuy.com",
+    #"url": "http://www.bestbuy.com/site/Philips+-+4000+Series+-+29%26%2334%3B+Class+(28-1/2%26%2334%3B+Diag.)+-+LED+-+720p+-+60Hz+-+HDTV/9806538.p;template=_specificationsTab",
+    #"modelID": "29PFL4508/F7",
+    #"featuresMap"
+    #"title"
+
+import json
+import numpy as np
+import pandas as pd
+import re
+import sympy
+import random
+import re
+import matplotlib.pyplot as plt
+from functools import lru_cache
+from itertools import combinations
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.cluster import AgglomerativeClustering
+
+# Loading JSON data into a dataframe
+with open('TVs-all-merged.json', 'r') as f:
+    data = json.load(f)
+
+# Set random seeds to make sure we can compare the baseline and extension
+MASTER_SEED = 42
+np.random.seed(MASTER_SEED)
+random.seed(MASTER_SEED)
+
+#################################- NEWLY ADDED PREPROCESSING FOR KEY-VALUE PAIRS - #################################
+
+def normalize_units(value: str) -> str:
+    v = str(value)
+
+    # Normalize quotes to "inch"
+    v = v.replace('"', 'inch')
+
+    # Normalize inch variants (like code 2)
+    inch_variants = ["Inch", "inches", "-inch", " inch", "inch"]
+    for w in inch_variants:
+        v = v.replace(w, "inch")
+        v = v.replace(w.lower(), "inch")
+        v = v.replace(w.upper(), "inch")
+
+    # Normalize hertz variants
+    hertz_variants = ["Hertz", "hertz", "Hz", "HZ", " hz", "-hz", "hz"]
+    for w in hertz_variants:
+        v = v.replace(w, "hz")
+        v = v.replace(w.lower(), "hz")
+        v = v.replace(w.upper(), "hz")
+
+    return v
+
+
+def preprocessor(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, (dict, list)):
+                preprocessor(v)
+            elif isinstance(v, str):
+                obj[k] = normalize_units(v)
+        return obj
+
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            if isinstance(v, (dict, list)):
+                preprocessor(v)
+            elif isinstance(v, str):
+                obj[i] = normalize_units(v)
+        return obj
+
+    return obj
+
+# Preprocess the data to normalize units
+data = preprocessor(data)
+
+rows = []
+
+for product_id, entries in data.items():
+    for entry in entries:
+        title = entry.get('title')
+        shop = entry.get('shop')
+        features = entry.get('featuresMap', {})
+
+        # join all feature values into one long string
+        features_string = " ".join(features.values())
+
+        # Store the brand, and if none is present --> Store "None"
+        brand = features.get('Brand', None)
+
+        rows.append({
+            "ID": product_id,
+            "Title": title,
+            "Shop": shop,
+            "Brand": brand,
+            # The string of values of the featuresmap
+            "Features": features_string,
+            # The dictionary of the featuresmap
+            "FeaturesDict": features
+        })
+
+complete_data = pd.DataFrame(rows, columns=["ID", "Title", "Shop", "Brand", "Features", "FeaturesDict"])
+# print(complete_data.head(10))
+# dict = complete_data.loc[0, 'FeaturesDict']
+# print(dict)
+# print("Keys: ", dict.keys())
+
+#--------------------- Data cleaning ---------------------#
+    # Based on sac2015c
+    # Removing all common characters like comma’s, slashes, and white space.
+    # In this way, we remove any noise from the data.
+    # Furthermore, each capital letter is replaced by its lowercase counterpart.
+
+def clean_title(title):
+    if pd.isna(title):
+        return title  
+
+    title = str(title)
+
+    # Step 1) Change everything into lowercase letters
+    title = title.lower()
+
+    # Step 2a) Normalize all info about inches: 55", 55-inch, 55inches → 55 inch
+    title = re.sub(r'(\d+)\s*(\"|inches?|inch)', r'\1inch', title)
+
+    # Step 2b) Also change random " into inch
+    title = re.sub(r'\"+', ' inch', title)
+
+    # Step 3) Normalize all info about hz: 120-hz, 120hz, 120 hz → 120 hz
+    title = re.sub(r'(\d+)\s*hz', r'\1hz', title)
+
+    return title
+
+# Make a copy of the original dataframe to store cleaned titles
+complete_cleanedData = complete_data.copy()
+# Check if cleaning is done correctly
+complete_cleanedData['CleanedTitle'] = complete_cleanedData['Title'].apply(clean_title)
+# print(complete_cleanedData['CleanedTitle'].head(10))
+
+#--------------------- Creating Model Words ---------------------#
+modelword_regex_title = re.compile(
+    r'[A-Za-z0-9]*(?:[0-9]+[^0-9, ]+|[^0-9, ]+[0-9]+)[A-Za-z0-9]*'
+)
+total_modelword_title = set()
+
+model_word_regex_KVPair = re.compile(
+    r'(^\d+(\.\d+)?[a-zA-Z]+$|^\d+(\.\d+)?$)'
+)
+total_modelword_KVPair = set()
+
+def extract_model_words_title(title):
+    if pd.isna(title):
+        return []
+
+    model_words_title = set()
+    split_title = title.split()
+    # Find all sequences as defined by the regex in the literature
+    for split_word in split_title:
+        if modelword_regex_title.match(split_word):
+           model_words_title.add(split_word)
+           total_modelword_title.add(split_word)
+
+    return model_words_title
+
+def extract_model_words_KVPair(features):
+    # Case 1: features is a dict of key -> value pairs (e.g. nmki/nmkj)
+    if isinstance(features, dict):
+        # Join all values into a single string such that we can split it
+        text = " ".join(str(v) for v in features.values())
+
+    # Case 2: features is already a string
+    else:
+        try:
+            if pd.isna(features):
+                return set()
+        except TypeError:
+            pass
+        text = str(features)
+
+    model_words_KVPair = set()
+    split_values = text.split()
+
+    # Find all sequences as defined by the regex in the literature
+    for split_value in split_values:
+        if model_word_regex_KVPair.match(split_value):
+            model_words_KVPair.add(split_value)
+            total_modelword_KVPair.add(split_value)
+
+    return model_words_KVPair
+
+total_modelword_KVPair_numeric = set()
+
+def keep_numeric(value):
+    match = re.match(
+        r'^(\d+(?:\.\d+)?)', value
+    )
+    # Extract numeric part from inserted values
+    numeric_part = match.group(1) if match else value
+    total_modelword_KVPair_numeric.add(numeric_part)
+
+    return numeric_part
+
+#--------------------- Verification Model Words from Title ---------------------#
+
+# Check if model words from title are computed correctly
+complete_cleanedData['Model words from title']= complete_cleanedData['CleanedTitle'].apply(extract_model_words_title)
+# print(complete_cleanedData['Model words from title'].iloc[0:10])
+print(f'Total unique model words in titles: {len(total_modelword_title)}')
+
+# Verify that the union of all model words per product equals the total set of title model words
+union_all_modelwordstitle = set().union(*complete_cleanedData['Model words from title'])
+print("Same sets for total model words title:", union_all_modelwordstitle == total_modelword_title)
+
+#--------------------- Verification Model Words from Values ---------------------#
+
+# Check if model words from values are computed correctly
+complete_cleanedData['Model words from values']= complete_cleanedData['Features'].apply(extract_model_words_KVPair)
+# print(complete_cleanedData['Model words from values'].iloc[0:10])
+print(f'Total unique model words in values: {len(total_modelword_KVPair)}')
+
+# Verify that the union of all model words per product equals the total set of model words from values
+union_all_modelwords_values = set().union(*complete_cleanedData['Model words from values'])
+print("Same sets for total model words values:", union_all_modelwords_values == total_modelword_KVPair)
+
+complete_cleanedData['Model words values numeric'] = complete_cleanedData['Model words from values'].apply(lambda x: {keep_numeric(val) for val in x})
+# print(complete_cleanedData['Model words values numeric'].iloc[0:10])
+
+print(f'Total unique numeric model words in values: {len(total_modelword_KVPair_numeric)}')
+# print(list(total_modelword_KVPair_numeric)[:10])
+
+#--------------------- Creating Binary Vectors ---------------------#
+# Create a new column in dataframe for every product containing its binary vector
+
+# Create total model words both from title (numeric+non-numeric) and values (numeric only)
+union_all_modelwords = total_modelword_title.union(total_modelword_KVPair_numeric)
+print(f'Total unique model words (title + values): {len(union_all_modelwords)}')
+
+# Need to sort the model words from title and values to have a fixed order for the binary vectors
+sorted_modelwords_title = sorted(total_modelword_title)
+sorted_modelwords_values_numeric = sorted(total_modelword_KVPair_numeric)
+sorted_modelwords = sorted_modelwords_title + sorted_modelwords_values_numeric
+length_totalMW = len(sorted_modelwords)
+print(f'Total length of sorted model words method 2: {length_totalMW}')
+# print("First 10 sorted model words method 2:", sorted_modelwords[:10])
+# print("Last 10 sorted model words method 2:", sorted_modelwords[-10:])
+
+# Separate indices for title and value model words
+n_title = len(sorted_modelwords_title)
+n_value = len(sorted_modelwords_values_numeric)
+
+mw_to_index_title = {mw: i for i, mw in enumerate(sorted_modelwords_title)}
+mw_to_index_value = {mw: n_title + i for i, mw in enumerate(sorted_modelwords_values_numeric)}
+
+def create_binary_vector(title_modelwords, value_modelwords_numeric):
+    if not isinstance(title_modelwords, (list, set)):
+        title_modelwords = [] if pd.isna(title_modelwords) else [title_modelwords]
+    if not isinstance(value_modelwords_numeric, (list, set)):
+        value_modelwords_numeric = [] if pd.isna(value_modelwords_numeric) else [value_modelwords_numeric]
+
+    title_set = set(title_modelwords)                 # e.g. {'60hz', '2812inch', '720p', ...}
+    value_numeric_set = set(value_modelwords_numeric) # e.g. {'768', '27', '2', '60', '16', ...}
+
+    binary_vector = [0] * length_totalMW
+
+    # First block of the vector containing title words 
+    for mw in title_set:
+        idx = mw_to_index_title.get(mw)
+        if idx is not None:
+            binary_vector[idx] = 1
+
+    # Second block of the vector containing value model words
+    for mw in value_numeric_set:
+        idx = mw_to_index_value.get(mw)
+        if idx is not None:
+            binary_vector[idx] = 1
+
+    return binary_vector
+
+# --------------------- Tests Binary Vectors for first product ---------------------#
+# print("First product model words:")
+# print(complete_cleanedData['Model words from title'].iloc[0])
+# print(complete_cleanedData['Model words values numeric'].iloc[0])
+
+# print("Creating binary vector for the first product...")
+# test_df_p1 = complete_cleanedData.head(1).copy()
+
+# print("Starting test binary vector creation...")
+# test_df_p1['Binary Vector'] = test_df_p1.apply(
+#     lambda row: create_binary_vector(
+#         row['Model words from title'],
+#         row['Model words values numeric']
+#     ),
+#     axis=1
+# )
+
+# print("TEST: Binary vectors created successfully.")
+# print(test_df_p1[['Model words from title', 'Model words values numeric', 'Binary Vector']])
+
+# vec0 = test_df_p1['Binary Vector'].iloc[0]
+# print("First 10 bits:", vec0[:10])
+# print("Last 10 bits:", vec0[-10:])
+
+# # Check Binary Vector correctness for first product only
+# # STEP 1 – function to decode a binary vector back to model words (to be able to check if the binary vector has 1s at the correct positions)
+def decode_vector(vector, vocab):
+    return [vocab[i] for i, val in enumerate(vector) if val == 1]
+
+# # STEP 2
+# row0 = test_df_p1.iloc[0]
+
+# expected_words = set(row0['Model words from title']) | set(row0['Model words values numeric'])
+# print("Expected words:", expected_words)
+# print("Number of expected words:", len(expected_words))
+
+# # STEP 3 – decode from the vector stored in test_df_p1
+# decoded_words = set(decode_vector(row0['Binary Vector'], sorted_modelwords))
+# print("Decoded words:", decoded_words)
+# print("Number of decoded words:", len(decoded_words))
+
+# print("\nMissing words (should be 1 but are 0):", expected_words - decoded_words)
+# print("Extra words (are 1 but should not be):", decoded_words - expected_words)
+
+# Perform binary vector creation for all products
+print("Starting full binary vector creation for all products...")
+complete_cleanedData['Binary Vector'] = complete_cleanedData.apply(lambda row: create_binary_vector(row['Model words from title'], row['Model words values numeric']), axis=1)
+print("Binary vectors created successfully.")
+# print(complete_cleanedData['Binary Vector'].iloc[0:10])
+
+# --------------------- Tests Binary Vectors for first 10 products ---------------------#
+# test_df = complete_cleanedData.head(10).copy()
+# def expected_mw_words(row):
+#     title_set = set(row['Model words from title'])
+#     value_numeric_set = set(row['Model words values numeric'])
+#     return title_set | value_numeric_set
+
+# print("Expected model words for first 10 products:")
+# for i in range(10):
+#     row = test_df.iloc[i]
+
+#     expected = expected_mw_words(row)
+#     decoded = set(decode_vector(row['Binary Vector'], sorted_modelwords))
+
+#     print(f"\n--- Product {i} ---")
+#     print("Expected MW words:", expected)
+#     print("Decoded MW words:", decoded)
+#     print("Missing words:", expected - decoded)
+#     print("Extra words:", decoded - expected)
+
+
+#--------------------- Min-Hashing ---------------------#
+
+def hash_function(x, prime, a, b):
+    x = int(x)
+    hash = (a + b * x) % prime
+    return hash
+
+# Overall important variables
+n_of_products = complete_cleanedData.shape[0]
+n_of_modelWords = length_totalMW
+
+# Number of hash functions + Parameters for Min-Hashing
+fraction = 0.5
+n_hashes = round(fraction*length_totalMW)
+
+def num_divisors(n: int) -> int:
+    c = 0
+    i = 1
+    while i * i <= n:
+        if n % i == 0:
+            c += 2 if i * i != n else 1
+        i += 1
+    return c
+
+def nrOfHashes_global(length_totalMW, rel_window=0.05):
+    # Find an integer close to n_hash which has > divisors
+    target = max(20, round(0.5 * length_totalMW))
+
+    # Create bounds on the n_hash
+    w = max(1, int(rel_window * target))
+    low = max(20, target - w)
+    high = target + w
+
+    best_k = target
+    best_divs = num_divisors(target)
+
+    # Calculate n_hash with most divisors
+    for k in range(low, high + 1):
+        divs = num_divisors(k)
+        if divs > best_divs:
+            best_divs = divs
+            best_k = k
+
+    return best_k
+
+n_hashes = nrOfHashes_global(length_totalMW)
+print(f"Number of hash functions: {n_hashes}")
+
+np.random.seed(MASTER_SEED)
+a_params = np.random.randint(1, 10000, size=int(n_hashes))
+b_params = np.random.randint(0, 10000, size=int(n_hashes))
+prime = sympy.nextprime(n_of_modelWords + 1000)
+
+# Initialize signature matrix (dimension: number of hash functions x number of products))
+signature_matrix = np.full((int(n_hashes), n_of_products), np.inf)
+
+# Create binary matrix from all binary vectors in dataframe
+binary_matrix = np.array(complete_cleanedData['Binary Vector'].tolist())
+# Transpose binary matrix to have model words as rows and products as columns
+M = binary_matrix.T
+
+# Min-Hashing algorithm
+for r in range(n_of_modelWords):
+    # 1) Compute h_i(r) for all hash functions
+     # shape h_vals = (n_hashes,)
+    h_vals = np.array([
+        hash_function(r, prime, a_params[i], b_params[i])
+        for i in range(n_hashes)
+    ])
+
+    # 2) Find all products (columns) that have a 1 in this row
+    prod_with_word = np.where(M[r] == 1)[0]
+
+    # 3) Update signature only for those products
+    if prod_with_word.size > 0:
+        # signature_matrix[i, c] = min(signature_matrix[i, c], h_i(r))
+        signature_matrix[:, prod_with_word] = np.minimum(
+            signature_matrix[:, prod_with_word],
+            h_vals[:, None]   # broadcast over all selected products
+        )
+
+# Store the minhash signature (list of length n_hashes) per product
+complete_cleanedData['Minhash_signature'] = signature_matrix.T.tolist()
+print("Minhashing completed successfully.")
+print("Dimensions of signature matrix:", signature_matrix.shape)
+
+# # --------------------- Tests Minhash Signatures for first 10 products ---------------------#
+# print("Minhash signatures for first 10 products:")
+# print(complete_cleanedData['Minhash_signature'].head(10))
+
+# # --------------------- Sanity check with Jaccard similarity for 2 products ---------------------#
+# def jaccard_similarity(vec1, vec2):
+#     vec1 = np.array(vec1)
+#     vec2 = np.array(vec2)
+#     intersection = np.sum((vec1 == 1) & (vec2 == 1))
+#     union = np.sum((vec1 == 1) | (vec2 == 1))
+#     return intersection / union if union > 0 else 0.0
+
+# def minhash_similarity(sig1, sig2):
+#     sig1 = np.array(sig1)
+#     sig2 = np.array(sig2)
+#     return np.sum(sig1 == sig2) / len(sig1)
+
+# # 2 products to compare
+# prod_a = 0
+# prod_b = 8
+# # prod_a = 2
+# # prod_b = 4
+
+# # Extract info from dataframe
+# vec_a = complete_cleanedData['Binary Vector'].iloc[prod_a]
+# vec_b = complete_cleanedData['Binary Vector'].iloc[prod_b]
+
+# sig_a = complete_cleanedData['Minhash_signature'].iloc[prod_a]
+# sig_b = complete_cleanedData['Minhash_signature'].iloc[prod_b]
+
+# # Compute similarities and print
+# jac = jaccard_similarity(vec_a, vec_b)
+# mh  = minhash_similarity(sig_a, sig_b)
+
+# print(f"Comparing product {prod_a} and {prod_b}:")
+# print(f"True Jaccard similarity:      {jac:.4f}")
+# print(f"Estimated MinHash similarity:  {mh:.4f}")
+
+# --------------------- LSH ---------------------#
+# Only keep the combinations of (r,b) where r*b = n_hashes and there is no remainder
+def get_number_of_bands(n_hashes, r):
+    if n_hashes % r != 0:
+        return 0  
+    return n_hashes // r
+
+def lsh(signature_matrix, r, b):
+    n_products, n_hashes = signature_matrix.shape
+    candidate_pairs = set()
+
+    for band in range(b):
+        start_row = band * r
+        if start_row >= n_hashes:
+            break  # nothing left
+
+        end_row = min(start_row + r, n_hashes)
+
+        buckets = {}
+        for product_idx in range(n_products):
+            band_signature = tuple(signature_matrix[product_idx, start_row:end_row])
+            buckets.setdefault(band_signature, []).append(product_idx)
+
+        for bucket in buckets.values():
+            if len(bucket) > 1:
+                for i in range(len(bucket)):
+                    for j in range(i + 1, len(bucket)):
+                        candidate_pairs.add((bucket[i], bucket[j]))
+
+    return candidate_pairs
+
+results_differentR = {}
+
+def get_theshold (r,b):
+    threshold = (1/b)**(1/r)
+    return threshold
+
+def get_combinations_rbt ():
+    combinations_rbt = []
+    for r in range(1, n_hashes + 1):
+        b = get_number_of_bands(n_hashes, r)
+        if b == 0:
+            continue
+        t = get_theshold(r,b)
+
+        combinations_rbt.append((r,b,t))
+    return combinations_rbt
+
+# def get_best_combination_rbt (combinations_rbt, signature_matrix, train_idx):
+#     # Step 1 Create train set of the data by taking subset 
+#     # Select rows from complete_cleanedData that are in `train_idx` to form test subset
+#     trainsubset_completecleanedData = complete_cleanedData.iloc[train_idx].reset_index(drop=True)
+#     # Number of products in train subset in this bootstrap
+#     n_of_prod_sub = len(trainsubset_completecleanedData)
+
+#     # Step 2 Create signature matrix only for products in train set 
+#     # signature_matrix (dimensions: (n_hashes, n_products) )
+#     # Select columns for products in subset and transpose -> (n_of_prod_sub, n_hashes)
+#     sub_signature = signature_matrix[:, train_idx].T
+#     n_hashes_sub = sub_signature.shape[1]
+
+#     results_different_combinations = []
+#     best_rbcombination_result = None
+
+#     for (r,b,t) in combinations_rbt:
+#         candidate_pairs = lsh(sub_signature, r, b)
+#         # Store candidate pairs for different combinations of (r,b)
+#         if len(candidate_pairs) == 0:
+#         # no candidates at all
+#             continue
+
+#         candidate_pairs_list = sorted(candidate_pairs)
+
+#         # ----- Step 4: Create dissimilarity matrix for train subset -----
+#         D = create_dissimilarity_matrix(
+#             n_of_prod_sub,
+#             candidate_pairs_list,
+#             trainsubset_completecleanedData,
+#             train_idx
+#         )
+
+#         # ----- Step 5: Perform clustering on dissimilarity matrix -----
+#         clusters, duplicate_clusters = cluster(D, threshold)
+#         predicted_pairs = clusters_to_pairs(duplicate_clusters)
+
+#         # ----- Step 6: Need to know true number of duplicates pairs in train subset -----
+#         true_pairs = get_true_duplicate_pairs(trainsubset_completecleanedData)
+
+#         # ----- Step 7: Compute all evaluation measures for this train set -----
+#         PQ, PC, F1, F1_star, frac_comp = evaluate_measures(
+#             candidate_pairs=candidate_pairs,
+#             predicted_pairs=predicted_pairs,
+#             true_pairs=true_pairs,
+#             n_products=n_of_prod_sub
+#         )
+#         result_singlerun = {"r": r, "b": b, "t": t, "PQ": PQ, "PC": PC, "F1": F1, "F1_star": F1_star, "frac_comp": frac_comp}
+#         results_different_combinations.append(result_singlerun)
+
+#         if best_rbcombination_result is None or F1_star > best_rbcombination_result["F1_star"]:
+#             best_rbcombination_result = result_singlerun
+
+#     return best_rbcombination_result, results_different_combinations
+
+# # --------------------- Tests LSH for first 10 candidate pairs ---------------------#
+# candidates = lsh(signature_matrix.T, 3, get_number_of_bands(n_hashes, 3))
+# print(f"Total candidate pairs for r=3: {len(candidates)}")
+# print("Some candidate pairs (first 10):", list(candidates)[:10])
+
+# for (i, j) in list(candidates)[:10]:
+#     vec_i = complete_cleanedData['Binary Vector'].iloc[i]
+#     vec_j = complete_cleanedData['Binary Vector'].iloc[j]
+
+#     sig_i = complete_cleanedData['Minhash_signature'].iloc[i]
+#     sig_j = complete_cleanedData['Minhash_signature'].iloc[j]
+
+#     jac = jaccard_similarity(vec_i, vec_j)
+#     mh  = minhash_similarity(sig_i, sig_j)
+
+#     print(f"Pair ({i}, {j}) -> Jaccard={jac:.3f}, MinHash={mh:.3f}")
+
+# # Take also some random non-candidate pairs to check what jaccard similarity they give
+# all_indices = list(range(n_of_products))
+# candidate_pairs_set = set(candidates)
+
+# print("\nRandom non-candidate pairs:")
+# count = 0
+# while count < 5:
+#     i, j = random.sample(all_indices, 2)
+#     if (i, j) in candidate_pairs_set or (j, i) in candidate_pairs_set:
+#         continue
+#     vec_i = complete_cleanedData['Binary Vector'].iloc[i]
+#     vec_j = complete_cleanedData['Binary Vector'].iloc[j]
+#     jac = jaccard_similarity(vec_i, vec_j)
+#     print(f"Non-candidate ({i}, {j}) -> Jaccard={jac:.3f}")
+#     count += 1
+
+# --------------------- Implementing MSM ---------------------#
+
+# Global cache for product MSM distances
+product_dist_cache = {}
+
+def qgrams(s, q=3):
+    if s is None:
+        s = ""
+    s = str(s)
+
+    # String with padding single spaces at begin and end and lowercase letters
+    s = " " + s.lower() + " "
+    # Generate q-grams of length q
+    return [s[i:i+q] for i in range(len(s) - q + 1)]
+
+# Implementing the global string similarity with caching and Jaccard
+@lru_cache(maxsize=None)
+def _calcSim_ordered(s1, s2, q):
+    Q1 = set(qgrams(s1, q))
+    Q2 = set(qgrams(s2, q))
+
+    # Both empty strings
+    if (s1 == "" and s2 == ""):
+        return 0.0
+
+    n1 = len(Q1)
+    n2 = len(Q2)
+
+    if n1 + n2 == 0:
+        return 1.0  # both empty after q-gramming
+
+    qgram_distance = len(Q1.symmetric_difference(Q2))
+    return (n1 + n2 - qgram_distance) / float(n1 + n2)
+
+def calcSim(s1, s2, q=3):
+    # None or empty values as "no string"
+    if (s1 is None or s1 == "") and (s2 is None or s2 == ""):
+        return 1.0
+    if (s1 is None or s1 == "") or (s2 is None or s2 == ""):
+        return 0.0
+
+    s1 = str(s1)
+    s2 = str(s2)
+
+    # Make sure the strings are lower lettercase
+    s1 = (s1 or "").lower()
+    s2 = (s2 or "").lower()
+
+    if s1 <= s2:
+        return _calcSim_ordered(s1, s2, q)
+    else:
+        return _calcSim_ordered(s2, s1, q)
+
+
+def mw(A, B):
+    if not A and not B:
+        return 0.0
+    inter = len(A & B)
+    denom = max(len(A), len(B))
+    return inter / float(denom)
+
+def minFeatures(features_i, features_j):
+    return min(len(features_i), len(features_j))
+
+def model_word_similarity(title1, title2):
+    mw1 = extract_model_words_title(title1)
+    mw2 = extract_model_words_title(title2)
+
+    # If there are no model words in both titles, return 0.0
+    if not mw1 and not mw2:
+        return 0.0
+
+    # Calculate intersection of the model words
+    inter = len(mw1 & mw2)
+    denom = max(len(mw1), len(mw2))
+    return inter / float(denom)
+
+def cosine_title_similarity(title1, title2):
+    vect = TfidfVectorizer()
+    tfidf = vect.fit_transform([title1, title2])
+    sim = cosine_similarity(tfidf[0:1], tfidf[1:2])[0][0]
+    return sim
+
+# TMWM Implementation based on sac(2015c)
+# Returns:
+    # 1.0     if cosine(title_i, title_j) >= alpha
+    # mwSim   if mwSim >= beta
+    # -1      otherwise
+def TMWMSim(prod_i, prod_j, alpha, beta):
+    # Get titles of both products
+    title_i = prod_i['Title'] if prod_i['Title'] else ""
+    title_j = prod_j['Title'] if prod_j['Title'] else ""
+
+    # Step 1 Cosine similarity check
+    cos_sim = cosine_title_similarity(title_i, title_j)
+    if cos_sim >= alpha:
+        return 1.0
+
+    # Step 2 Model word similarity check 
+    mwSim = model_word_similarity(title_i, title_j)
+    if mwSim >= beta:
+        return mwSim
+
+    # Step 3 No clustering: return -1 
+    return -1
+
+# ---------- Main function for MSM ----------#
+def sim_MSM(prod_i, prod_j, alpha, beta, gamma, mu):
+
+    # Get the dictionary key -> value for the 2 products
+    features_i = prod_i['FeaturesDict']
+    features_j = prod_j['FeaturesDict']
+
+    # Step 1 key-value matching 
+    sim = 0.0
+    m = 0          # number of matches
+    w_sum = 0.0    # sum of weights
+
+    # Create copy of all features to keep track of non-matching keys
+    nmki = dict(features_i)  # non-matching keys of product i
+    nmkj = dict(features_j)  # non-matching keys of product j
+
+    for key_i, val_i in features_i.items():
+        for key_j, val_j in features_j.items():
+            keySim = calcSim(key_i, key_j)
+
+            if keySim > gamma:
+                valueSim = calcSim(str(val_i), str(val_j))
+                weight = keySim
+
+                sim += weight * valueSim
+                m += 1
+                w_sum += weight
+
+                # Remove matched KVPs from non-matching sets
+                nmki.pop(key_i, None)
+                nmkj.pop(key_j, None)
+
+    if w_sum > 0.0:
+        avgSim = sim / w_sum
+    else:
+        avgSim = 0.0
+
+    # Step 2 Model-words similarity on remaining attributes 
+    # Extract model words from non-matching KVPs including non-numeric parts
+    mwPerc = mw(extract_model_words_KVPair(nmki), extract_model_words_KVPair(nmkj))
+
+    # Step 3 TMWM on titles 
+    titleSim = TMWMSim(prod_i, prod_j, alpha, beta)
+
+    # Step 4 Final similarity computation 
+    # Need to make sure if there are no features, we avoid division by zero
+    min_feat = max(minFeatures(features_i, features_j), 1)
+
+    if titleSim == -1:
+        # TMWM did not find a duplicate candidate
+        theta1 = m / float(min_feat)
+        theta2 = 1.0 - theta1
+        hSim_val = theta1 * avgSim + theta2 * mwPerc
+    else:
+        # TMWM found duplicate candidate
+        theta1 = (1.0 - mu) * (m / float(min_feat))
+        theta2 = 1.0 - mu - theta1
+        hSim_val = theta1 * avgSim + theta2 * mwPerc + mu * titleSim
+
+    # Set similarity to value between [0,1]
+    if hSim_val < 0.0:
+        hSim_val = 0.0
+    elif hSim_val > 1.0:
+        hSim_val = 1.0
+
+    return hSim_val
+
+# --------------------- Creating dissimilarity matrix --------------------- #
+dist_cache_hits = 0
+dist_cache_misses = 0
+
+# Convert set -> list so  can access by index
+# candidate_pairs_list = sorted(candidate_pairs)  # sorted for stable order
+def create_dissimilarity_matrix(n_of_products, candidate_list, subset_df, orig_indices):
+    print("Creating dissimilarity matrix...")
+    global dist_cache_hits, dist_cache_misses
+
+    # Start with all ∞
+    D = np.full((n_of_products, n_of_products), np.inf)
+
+    # distance to self = 0
+    np.fill_diagonal(D, 0.0)
+
+    for (i, j) in candidate_list:
+        if i == j:
+            continue  # already 0 on diagonal
+
+        # Step 1 Apply filters to not iterate over all combinations
+        # Filter 1&2 Same webshop/ different brand
+        webshop_i = subset_df.iloc[i]['Shop']
+        webshop_j = subset_df.iloc[j]['Shop']
+        if webshop_i == webshop_j:
+            continue
+
+        brand_i = subset_df.iloc[i]['Brand']
+        brand_j = subset_df.iloc[j]['Brand']
+        if pd.notna(brand_i) and pd.notna(brand_j) and brand_i != brand_j:
+            continue
+
+        # Step 2 map to original indices for caching 
+        orig_i = int(orig_indices[i])
+        orig_j = int(orig_indices[j])
+        key = (orig_i, orig_j) if orig_i < orig_j else (orig_j, orig_i)
+
+        # Step 3 check global product distance cache 
+        if key in product_dist_cache:
+            dist_cache_hits += 1
+            dist_ij = product_dist_cache[key]
+        else:
+            # compute MSM similarity once for this original pair
+            dist_cache_misses += 1
+            prod_i = complete_cleanedData.iloc[orig_i]
+            prod_j = complete_cleanedData.iloc[orig_j]
+
+            alpha = 0.602
+            beta  = 0.000
+            gamma = 0.757
+            mu    = 0.650
+
+            sim_ij = sim_MSM(prod_i, prod_j,
+                             alpha=alpha, beta=beta, gamma=gamma, mu=mu)
+            dist_ij = 1.0 - sim_ij
+
+            product_dist_cache[key] = dist_ij
+
+        # Step 4 fill subset dissimilarity matrix 
+        D[i, j] = dist_ij
+        D[j, i] = dist_ij  # symmetric
+
+    print("Dissimilarity matrix created successfully.")
+    print("Dissimilarity matrix shape:", D.shape)
+    return D
+
+
+# Create dissimilarity matrix D
+# print("Creating dissimilarity matrix...")
+# dissimilarity_matrix = create_dissimilarity_matrix(
+#     n_of_products,
+#     candidate_pairs_list,
+#     complete_cleanedData
+# )
+# print("Dissimilarity matrix created successfully.")
+# print("Dissimilarity matrix shape:", dissimilarity_matrix.shape)
+
+# --------------------- Agglomerative complete linkage clustering ---------------------#
+# Threshold that came out of tuning algorithm 
+# threshold = 0.440
+threshold = 0.453333
+
+def cluster(dissimilarity_matrix, threshold, big=1e9):
+    # Make a float numpy array copy so we can safely modify it
+    D = np.array(dissimilarity_matrix, dtype=float)
+
+    # Replace infinities by a very large number, so they're never chosen as "closest" pairs
+    D[np.isinf(D)] = big
+
+    # Hierarchical complete-linkage clustering on precomputed distances
+    model = AgglomerativeClustering(
+        metric='precomputed',    
+        linkage='complete',
+        distance_threshold=threshold,
+        n_clusters=None
+    )
+
+    labels = model.fit_predict(D)
+
+    # Map cluster labels to row numbers corresponding to products
+    clusters = {}
+    for idx, label in enumerate(labels):
+        clusters.setdefault(label, []).append(idx)
+
+    # Sort products within each cluster for readability
+    for label in clusters:
+        clusters[label].sort()
+
+    # Only clusters with size >= 2 are interesting as "duplicate groups"
+    duplicate_clusters = [prod_list for prod_list in clusters.values() if len(prod_list) > 1]
+
+    return clusters, duplicate_clusters
+
+
+# clusters, duplicate_clusters = cluster(dissimilarity_matrix, threshold)
+
+# print("Number of clusters:", len(clusters))
+# print("Number of duplicate groups:", len(duplicate_clusters))
+
+# i = clusters[0][0]  # take any index from any cluster
+# print("Cluster index:", i)
+# print("From dataframe:", complete_cleanedData.iloc[i]['ID'])
+# print("From dissimilarity matrix:", dissimilarity_matrix[i, i])
+
+# --------------------- Evaluation measures ---------------------#
+def get_true_duplicate_pairs(complete_cleanedData):
+    true_pairs = set()
+
+    # Group rows by model ID
+    for model_id, group in complete_cleanedData.groupby('ID'):
+        # Store the indices of all rows with this model ID
+        indices = list(group.index)
+        if len(indices) > 1:
+            # All index pairs inside this group are true duplicate pairs
+            for i, j in combinations(indices, 2):
+                true_pairs.add(tuple(sorted((i, j))))  # normalize as (small, big)
+
+    return true_pairs
+
+def clusters_to_pairs(duplicate_clusters):
+    pairs = set()
+    for cluster in duplicate_clusters:
+        if len(cluster) > 1:
+            for i, j in combinations(cluster, 2):
+                pairs.add(tuple(sorted((i, j))))
+
+    return pairs
+
+def evaluate_measures(candidate_pairs, predicted_pairs, true_pairs, n_of_products):
+    # Normalize everything into sorted pairs sets (i < j)
+    # candidate_pairs : iterable of (i,j) from LSH (candidate comparisons)
+    cand_set = {tuple(sorted(p)) for p in candidate_pairs}
+    # predicted_pairs : iterable of (i,j) from clustering (final duplicates)
+    pred_set = {tuple(sorted(p)) for p in predicted_pairs}
+    # true_pairs      : iterable of (i,j) ground truth duplicates (same 'ID')
+    true_set = {tuple(sorted(p)) for p in true_pairs}
+
+    candidate_TP = len(cand_set & true_set)     # candidate pairs that are truly duplicates
+    candidate_FP = len(cand_set - true_set)     # candidate pairs that are not true duplicates
+
+    number_comparisons = len(cand_set)
+    complete_duplicates = len(true_set) # Must be 4?
+
+    # Need to handle division by zero
+    PQ = candidate_TP / number_comparisons if number_comparisons > 0 else 0.0
+    PC = candidate_TP / complete_duplicates if complete_duplicates > 0 else 0.0
+
+    TP = len(pred_set & true_set)
+    FP = len(pred_set - true_set)
+    FN = len(true_set - pred_set)
+
+    # F1* based on candidate quality (PQ, PC)
+    F1_star = 2 * (PQ * PC) / (PQ + PC) if (PQ + PC) > 0 else 0.0
+
+    # Pair-based F1 for final clustering
+    if len(pred_set) == 0:
+        precision = 0.0
+        recall = 0.0
+        F1 = 0.0
+    else:
+        precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
+        recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+        F1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    total_pairs = n_of_products * (n_of_products - 1) // 2
+    frac_comp = number_comparisons / total_pairs if total_pairs > 0 else 0.0
+
+    return PQ, PC, F1, F1_star, frac_comp, precision, recall
+
+
+# true_pairs = get_true_duplicate_pairs(complete_cleanedData)
+# print("Number of true duplicate pairs:", len(true_pairs))
+# predicted_pairs = clusters_to_pairs(duplicate_clusters)
+
+# # Evaluate measures
+# PQ, PC, F1, F1_star, frac_comp = evaluate_measures(
+#     candidate_pairs=candidate_pairs,
+#     predicted_pairs=predicted_pairs,
+#     true_pairs=true_pairs,
+#     n_of_products=n_of_products
+# )
+
+# print("PQ (precision of candidates / LSH):", PQ)
+# print("PC (recall of candidates / LSH):   ", PC)
+# print("F1* (based on PQ, PC):             ", F1_star)
+# print("F1 (on clustering pairs):          ", F1)
+
+#  --------------------- Bootstrap ---------------------#
+n_bootstrap = 5
+
+def run_single_pipeline(indices, r, b, threshold):
+    # indices: array of original row indices in complete_cleanedData
+
+    # Step 1 Create subset of the data 
+    subset_df = complete_cleanedData.iloc[indices].reset_index(drop=True)
+    n_of_prod_sub = len(subset_df)
+
+    # Step 2 Create signature matrix only for products in subset 
+    sub_signature = signature_matrix[:, indices].T  # shape: (n_of_prod_sub, n_hashes)
+
+    # Step 3 Perform LSH on subset 
+    candidate_pairs = lsh(sub_signature, r, b)
+
+    if len(candidate_pairs) == 0:
+        # no candidates at all
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+
+    candidate_pairs_list = sorted(candidate_pairs)
+
+    # Step 4 MSM + clustering 
+
+    D = create_dissimilarity_matrix(
+        n_of_prod_sub,
+        candidate_pairs_list,
+        subset_df,
+        indices          # pass original indices for caching
+    )
+    clusters, duplicate_clusters = cluster(D, threshold)
+    predicted_pairs = clusters_to_pairs(duplicate_clusters)
+
+    # Step 5 True duplicate pairs in subset 
+    true_pairs = get_true_duplicate_pairs(subset_df)
+    print(f"Number of true duplicate pairs in subset: {len(true_pairs)}")
+
+    # Step 6 Compute all evaluation measures 
+    PQ, PC, F1, F1_star, frac_comp, precision, recall = evaluate_measures(
+        candidate_pairs=candidate_pairs,
+        predicted_pairs=predicted_pairs,
+        true_pairs=true_pairs,
+        n_of_products=n_of_prod_sub
+    )
+
+    return PQ, PC, F1, F1_star, frac_comp, precision, recall
+
+def run_lsh_pipeline(indices, r, b):
+    # 1) subset of products for this bootstrap
+    subset = complete_cleanedData.iloc[indices].reset_index(drop=True)
+    n_sub = len(subset)
+
+    # 2) sub-signature matrix (products x hashes)
+    sub_signature = signature_matrix[:, indices].T
+
+    # 3) LSH → candidate pairs (in subset index space 0..n_sub-1)
+    candidate_pairs = lsh(sub_signature, r, b)
+    if len(candidate_pairs) == 0:
+        return 0.0, 0.0, 0.0, 0.0   # PQ, PC, F1_LSH, frac_comp
+
+    # 4) ground truth duplicate pairs in this subset
+    true_pairs = get_true_duplicate_pairs(subset)
+
+    # Evaluation of LSH measures
+    cand_set = {tuple(sorted(p)) for p in candidate_pairs}
+    true_set = {tuple(sorted(p)) for p in true_pairs}
+
+    candidate_TP = len(cand_set & true_set)
+    number_comparisons = len(cand_set)
+    complete_duplicates = len(true_set)
+
+    PQ = candidate_TP / number_comparisons if number_comparisons > 0 else 0.0
+    PC = candidate_TP / complete_duplicates if complete_duplicates > 0 else 0.0
+    F1_LSH = 2 * PQ * PC / (PQ + PC) if (PQ + PC) > 0 else 0.0
+
+    total_pairs = n_sub * (n_sub - 1) // 2
+    frac_comp = number_comparisons / total_pairs if total_pairs > 0 else 0.0
+
+    return PQ, PC, F1_LSH, frac_comp
+
+def bootstrap_evaluation(n_bootstrap, threshold):
+    # all_metrics = []
+    # best_params_per_boot = []
+
+    all_results = []
+    comb_rbt = get_combinations_rbt()
+    print(f"Length possible (r, b, t) combinations: {len(comb_rbt)}")
+    print (f"Possible (r, b, t) combinations: {comb_rbt}")
+
+    for boot in range(n_bootstrap):
+        print(f"\nBootstrap {boot+1}/{n_bootstrap}")
+
+        np.random.seed(MASTER_SEED + boot)
+        random.seed(MASTER_SEED + boot)
+        # Step 1 Create bootstrap train set with replacement 
+        sampled_idx = np.random.choice(n_of_products, size=n_of_products, replace=True)
+        train_idx = np.unique(sampled_idx)  # unique indices for train set
+        print (f"  Train set size (unique products): {len(train_idx)}")
+
+        # Verify mapping between subset indices and original indices
+        subset_df = complete_cleanedData.iloc[train_idx].reset_index(drop=True)
+
+        print("  Check index mapping:")
+        print("    Original indices (first 5):", train_idx[:5])
+        print("    Subset IDs (first 5):", subset_df['ID'].head().tolist())
+        print("    Original IDs for these indices:",
+          complete_cleanedData.iloc[train_idx[:5]]['ID'].tolist())
+
+        for (r,b,t) in comb_rbt:
+            # Run clustering pipeline
+            PQ, PC, F1, F1_star, frac_comp, precision, recall = run_single_pipeline(train_idx, r, b, threshold)
+
+            print(f"    r={r:3d}, b={b:3d}, PQ={PQ:.4f}, PC={PC:.4f}, F1={F1:.4f}, F1*={F1_star:.4f}, frac={frac_comp:.4f}")
+
+            all_results.append({
+                'bootstrap': boot + 1,
+                'r': r,
+                'b': b,
+                't': t,
+                'PQ': PQ,
+                'PC': PC,
+                'F1': F1,
+                'F1_star': F1_star,
+                'frac_comp': frac_comp
+            })
+
+
+    if not all_results:
+        print("No results collected.")
+        return pd.DataFrame(), pd.DataFrame()
+
+    results_df = pd.DataFrame(all_results)
+    # Remove rows where metrics are NaN (too many candidates or skipped) 
+    results_df = results_df.dropna(subset=['PQ', 'PC', 'F1', 'F1_star', 'frac_comp'])
+
+    # Step 3 take averages over all bootstraps per (r, b) 
+    # For clustering pipeline
+    agg_by_rb = (
+        results_df
+        .groupby(['r', 'b'], as_index=False)[['PQ', 'PC', 'F1', 'F1_star', 'frac_comp']]
+        .mean()
+    )
+
+    print("\nAverage metrics over all bootstraps per (r, b):")
+    print(agg_by_rb)
+
+    global dist_cache_hits, dist_cache_misses
+    total_lookups = dist_cache_hits + dist_cache_misses
+    hit_rate = dist_cache_hits / total_lookups if total_lookups > 0 else 0.0
+    print("\nProduct distance cache stats (MSM dissimilarities):")
+    print(f"  hits   : {dist_cache_hits}")
+    print(f"  misses : {dist_cache_misses}")
+    print(f"  hit rate: {hit_rate:.4f}")
+
+    return results_df, agg_by_rb
+
+# Run bootstrap evaluation for 5 bootstraps
+print("\nStarting bootstrap evaluation...")
+results_df, agg_by_rb = bootstrap_evaluation(
+    n_bootstrap=n_bootstrap,
+    threshold=threshold
+)
+
+agg_by_rb_baseline_2 = agg_by_rb.copy()
+agg_by_rb_baseline_2["version"] = "baseline"
+
+# Save to CSV so we can compare later
+agg_by_rb_baseline_2.to_csv("agg_baseline_2.csv", index=False)
+
+print("\nSaved baseline results to agg_baseline_2.csv")
+
+# # --------------------- Plots ---------------------#
+# Sort by frac_comp so the lines look nicer
+agg_by_rb_sorted = agg_by_rb_baseline_2.sort_values('frac_comp').reset_index(drop=True)
+x = agg_by_rb_sorted['frac_comp']
+
+# -------- PQ vs frac_comp --------
+plt.figure()
+plt.plot(x, agg_by_rb_sorted['PQ'], '-o')
+plt.xlabel("Fraction of comparisons")
+plt.ylabel("PQ")
+plt.title("Pairwise Quality (PQ) vs Fraction of Comparisons")
+plt.show()
+
+# -------- PC vs frac_comp --------
+plt.figure()
+plt.plot(x, agg_by_rb_sorted['PC'], '-o')
+plt.xlabel("Fraction of comparisons")
+plt.ylabel("PC")
+plt.title("Pairwise Completeness (PC) vs Fraction of Comparisons")
+plt.show()
+
+# -------- F1 vs frac_comp --------
+plt.figure()
+plt.plot(x, agg_by_rb_sorted['F1'], '-o')
+plt.xlabel("Fraction of comparisons")
+plt.ylabel("F1")
+plt.title("F1 vs Fraction of Comparisons")
+plt.show()
+
+# -------- F1* vs frac_comp --------
+plt.figure()
+plt.plot(x, agg_by_rb_sorted['F1_star'], '-o')
+plt.xlabel("Fraction of comparisons")
+plt.ylabel("F1*")
+plt.title("F1* vs Fraction of Comparisons")
+plt.show()
