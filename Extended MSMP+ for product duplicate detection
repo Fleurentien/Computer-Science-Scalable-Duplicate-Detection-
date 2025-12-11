@@ -667,7 +667,7 @@ print("Dimensions of signature matrix:", signature_matrix.shape)
 # Only keep the combinations of (r,b) where r*b = n_hashes and there is no remainder
 def get_number_of_bands(n_hashes, r):
     if n_hashes % r != 0:
-        return 0  # Invalid → skip
+        return 0  
     return n_hashes // r
     # return int(np.ceil(n_hashes / r))
 
@@ -1295,10 +1295,10 @@ def bootstrap_evaluation(n_bootstrap, threshold):
         return pd.DataFrame(), pd.DataFrame()
 
     results_df = pd.DataFrame(all_results)
-    # ----- Remove rows where metrics are NaN (too many candidates or skipped) -----
+    # Remove rows where metrics are NaN (too many candidates or skipped) 
     results_df = results_df.dropna(subset=['PQ', 'PC', 'F1', 'F1_star', 'frac_comp'])
 
-    # ----- Step 3: take averages over all bootstraps per (r, b) -----
+    # Step 3 take averages over all bootstraps per (r, b) 
     agg_by_rb = (
     results_df
     .groupby(['r', 'b'])
