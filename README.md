@@ -4,6 +4,7 @@ This GitHub link belongs to the assignment to extend the literature on MSMP+ to 
 **Repository Structure**
 
 1. Extended MSMP+ for product detection.ipynb
+
 Implements the extended MSMP+ framework, including:
   - enhanced data cleaning (unit normalization, VESA regex, padded q-grams),
   - extraction of model words from titles, value attributes, and brand names,
@@ -13,9 +14,11 @@ Implements the extended MSMP+ framework, including:
   - evaluation of PQ, PC, F1, and F1*.
 
 2. Replication Baseline MSMP+.ipynb
+
 Provides a replication of the original MSMP+ method as described in the literature and serves as the baseline. 
 
-3. Plotting baseline and extension to compare performance.ipynb
+4. Plotting baseline and extension to compare performance.ipynb
+   
 Generates the evaluation figures and metrics used in the accompanying analysis, including plots of PQ, PC, F1, and F1* as functions of the fraction of comparisons, as well as the area-under-curve values.
 
 For running the tuning of the clustering threshold the following adjustments should be made to both extensions and baseline notebooks: 
