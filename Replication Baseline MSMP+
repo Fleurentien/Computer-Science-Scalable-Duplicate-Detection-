@@ -411,17 +411,17 @@ M = binary_matrix.T
 
 # Min-Hashing algorithm
 for r in range(n_of_modelWords):
-    # 1) Compute h_i(r) for all hash functions
+    # Step 1 Compute h_i(r) for all hash functions
      # shape h_vals = (n_hashes,)
     h_vals = np.array([
         hash_function(r, prime, a_params[i], b_params[i])
         for i in range(n_hashes)
     ])
 
-    # 2) Find all products (columns) that have a 1 in this row
+    # Step 2 Find all products (columns) that have a 1 in this row
     prod_with_word = np.where(M[r] == 1)[0]
 
-    # 3) Update signature only for those products
+    # Step 3 Update signature only for those products
     if prod_with_word.size > 0:
         # signature_matrix[i, c] = min(signature_matrix[i, c], h_i(r))
         signature_matrix[:, prod_with_word] = np.minimum(
