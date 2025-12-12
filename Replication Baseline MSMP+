@@ -119,16 +119,16 @@ def clean_title(title):
 
     title = str(title)
 
-    # Step 1) Change everything into lowercase letters
+    # Step 1 Change everything into lowercase letters
     title = title.lower()
 
-    # Step 2a) Normalize all info about inches: 55", 55-inch, 55inches → 55 inch
+    # Step 2 Normalize all info about inches: 55", 55-inch, 55inches → 55 inch
     title = re.sub(r'(\d+)\s*(\"|inches?|inch)', r'\1inch', title)
 
-    # Step 2b) Also change random " into inch
+    # Step 3 Also change random " into inch
     title = re.sub(r'\"+', ' inch', title)
 
-    # Step 3) Normalize all info about hz: 120-hz, 120hz, 120 hz → 120 hz
+    # Step 4 Normalize all info about hz: 120-hz, 120hz, 120 hz → 120 hz
     title = re.sub(r'(\d+)\s*hz', r'\1hz', title)
 
     return title
@@ -348,7 +348,6 @@ print("Binary vectors created successfully.")
 #     print("Missing words:", expected - decoded)
 #     print("Extra words:", decoded - expected)
 
-
 #--------------------- Min-Hashing ---------------------#
 
 def hash_function(x, prime, a, b):
@@ -546,7 +545,7 @@ def get_combinations_rbt ():
 
 #         candidate_pairs_list = sorted(candidate_pairs)
 
-#         # ----- Step 4: Create dissimilarity matrix for train subset -----
+#         # Step 4 Create dissimilarity matrix for train subset 
 #         D = create_dissimilarity_matrix(
 #             n_of_prod_sub,
 #             candidate_pairs_list,
@@ -554,14 +553,14 @@ def get_combinations_rbt ():
 #             train_idx
 #         )
 
-#         # ----- Step 5: Perform clustering on dissimilarity matrix -----
+#         # Step 5 Perform clustering on dissimilarity matrix 
 #         clusters, duplicate_clusters = cluster(D, threshold)
 #         predicted_pairs = clusters_to_pairs(duplicate_clusters)
 
-#         # ----- Step 6: Need to know true number of duplicates pairs in train subset -----
+#         # Step 6 Need to know true number of duplicates pairs in train subset 
 #         true_pairs = get_true_duplicate_pairs(trainsubset_completecleanedData)
 
-#         # ----- Step 7: Compute all evaluation measures for this train set -----
+#         # Step 7 Compute all evaluation measures for this train set 
 #         PQ, PC, F1, F1_star, frac_comp = evaluate_measures(
 #             candidate_pairs=candidate_pairs,
 #             predicted_pairs=predicted_pairs,
@@ -971,7 +970,6 @@ def evaluate_measures(candidate_pairs, predicted_pairs, true_pairs, n_of_product
 
     return PQ, PC, F1, F1_star, frac_comp, precision, recall
 
-
 # true_pairs = get_true_duplicate_pairs(complete_cleanedData)
 # print("Number of true duplicate pairs:", len(true_pairs))
 # predicted_pairs = clusters_to_pairs(duplicate_clusters)
@@ -1037,19 +1035,19 @@ def run_single_pipeline(indices, r, b, threshold):
     return PQ, PC, F1, F1_star, frac_comp, precision, recall
 
 def run_lsh_pipeline(indices, r, b):
-    # 1) subset of products for this bootstrap
+    # Step 1 subset of products for this bootstrap
     subset = complete_cleanedData.iloc[indices].reset_index(drop=True)
     n_sub = len(subset)
 
-    # 2) sub-signature matrix (products x hashes)
+    # Step 2 sub-signature matrix (products x hashes)
     sub_signature = signature_matrix[:, indices].T
 
-    # 3) LSH → candidate pairs (in subset index space 0..n_sub-1)
+    # Step 3 LSH → candidate pairs (in subset index space 0..n_sub-1)
     candidate_pairs = lsh(sub_signature, r, b)
     if len(candidate_pairs) == 0:
         return 0.0, 0.0, 0.0, 0.0   # PQ, PC, F1_LSH, frac_comp
 
-    # 4) ground truth duplicate pairs in this subset
+    # Step 4 ground truth duplicate pairs in this subset
     true_pairs = get_true_duplicate_pairs(subset)
 
     # Evaluation of LSH measures
