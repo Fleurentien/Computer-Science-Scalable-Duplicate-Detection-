@@ -33,7 +33,8 @@ The notebooks require Python 3.9 or higher, Jupyter Notebook, and standard scien
 
 **Summary of Results**
 The extended MSMP+ demonstrates improved performance relative to the baseline across all evaluation metrics. 
-  Notable improvements include:
-    - an increase in maximum Pair Quality from 0.15 to 0.32,
-    - an increase in Pair Completeness from 89% to 96% at 20–25% of all pairwise comparisons,
-    - improvements of 9.77% and 10.54% in the area under the F1 and F1* curves, respectively.
+Notable improvements include:
+  
+- an increase in maximum Pair Quality from 0.15 to 0.32,
+- an increase in Pair Completeness from 89% to 96% at 20–25% of all pairwise comparisons,
+- improvements of 9.77% and 10.54% in the area under the F1 and F1* curves, respectively.
