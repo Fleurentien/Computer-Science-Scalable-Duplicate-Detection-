@@ -205,7 +205,7 @@ def get_brand(product_title, features, popular_brand_list):
     if norm_brand is not None:
         return norm_brand
 
-    # 2) Use title to find brand of product
+    # Case 2) Use title to find brand of product
     if not isinstance(product_title, str):
         return None
 
@@ -273,23 +273,23 @@ def clean_title(title):
     # Step 0) Normalize all units that appear in the title
     title = normalize_units(title)
 
-    # Step 1) Normalize characters belonging often to inch, hz, lbs etc 
+    # Step 1 Normalize characters belonging often to inch, hz, lbs etc 
     title = re.sub(
         r'(-?\d+(?:\.\d+)?)\s*(inch|hz|lbs|watt|hours|degrees|nit)',
         r'\1\2',
         title
     )
 
-    # Step 2) Remove all unneccesary characters except letters, numbers and single spaces
+    # Step 2 Remove all unneccesary characters except letters, numbers and single spaces
     title = re.sub(r'[^a-z0-9 ]+', '', title)
 
-    # Step 3) Remove the names of the websites since assumption no duplicates on same shop
+    # Step 3 Remove the names of the websites since assumption no duplicates on same shop
     title = re.sub(r'\bamazoncom\b', ' ', title)
     title = re.sub(r'\bneweggcom\b', ' ', title)
     title = re.sub(r'\bbestbuycom\b', ' ', title)
     title = re.sub(r'\bthenerdsnet\b', ' ', title)
 
-    # Step 4) Remove multiple spaces and strip
+    # Step 4 Remove multiple spaces and strip
     title = re.sub(r'\s+', ' ', title).strip()
 
     return title
@@ -339,12 +339,12 @@ def extract_model_words_title(title, brand=None, brand_list=None):
     return model_words_title
 
 def extract_model_words_KVPair(features):
-    # Case 1: features is a dict of key -> value pairs (e.g. nmki/nmkj)
+    # Case 1) features is a dict of key -> value pairs (e.g. nmki/nmkj)
     if isinstance(features, dict):
         # Join all values into a single string such that we can split it
         text = " ".join(str(v) for v in features.values())
 
-    # Case 2: features is already a string
+    # Case 2) features is already a string
     else:
         try:
             if pd.isna(features):
@@ -602,17 +602,17 @@ M = binary_matrix.T
 
 # Min-Hashing algorithm
 for r in range(n_of_modelWords):
-    # 1) Compute h_i(r) for all hash functions
+    # Step 1 Compute h_i(r) for all hash functions
      # shape h_vals = (n_hashes,)
     h_vals = np.array([
         hash_function(r, prime, a_params[i], b_params[i])
         for i in range(n_hashes)
     ])
 
-    # 2) Find all products (columns) that have a 1 in this row
+    # Step 2 Find all products (columns) that have a 1 in this row
     prod_with_word = np.where(M[r] == 1)[0]
 
-    # 3) Update signature only for those products
+    # Step 3 Update signature only for those products
     if prod_with_word.size > 0:
         # signature_matrix[i, c] = min(signature_matrix[i, c], h_i(r))
         signature_matrix[:, prod_with_word] = np.minimum(
@@ -713,13 +713,13 @@ def get_combinations_rbt ():
     return combinations_rbt
 
 # def get_best_combination_rbt (combinations_rbt, signature_matrix, train_idx):
-#     # ----- Step 1: Create train set of the data by taking subset -----
+#     # Step 1 Create train set of the data by taking subset 
 #     # Select rows from complete_cleanedData that are in `train_idx` to form test subset
 #     trainsubset_completecleanedData = complete_cleanedData.iloc[train_idx].reset_index(drop=True)
 #     # Number of products in train subset in this bootstrap
 #     n_of_prod_sub = len(trainsubset_completecleanedData)
 
-#     # ----- Step 2: Create signature matrix only for products in train set -----
+#     # Step 2 Create signature matrix only for products in train set 
 #     # signature_matrix (dimensions: (n_hashes, n_products) )
 #     # Select columns for products in subset and transpose -> (n_of_prod_sub, n_hashes)
 #     sub_signature = signature_matrix[:, train_idx].T
@@ -737,7 +737,7 @@ def get_combinations_rbt ():
 
 #         candidate_pairs_list = sorted(candidate_pairs)
 
-#         # ----- Step 4: Create dissimilarity matrix for train subset -----
+#         # Step 4 Create dissimilarity matrix for train subset 
 #         D = create_dissimilarity_matrix(
 #             n_of_prod_sub,
 #             candidate_pairs_list,
@@ -745,14 +745,14 @@ def get_combinations_rbt ():
 #             train_idx
 #         )
 
-#         # ----- Step 5: Perform clustering on dissimilarity matrix -----
+#         # Step 5 Perform clustering on dissimilarity matrix 
 #         clusters, duplicate_clusters = cluster(D, threshold)
 #         predicted_pairs = clusters_to_pairs(duplicate_clusters)
 
-#         # ----- Step 6: Need to know true number of duplicates pairs in train subset -----
+#         # Step 6 Need to know true number of duplicates pairs in train subset 
 #         true_pairs = get_true_duplicate_pairs(trainsubset_completecleanedData)
 
-#         # ----- Step 7: Compute all evaluation measures for this train set -----
+#         # Step 7 Compute all evaluation measures for this train set 
 #         PQ, PC, F1, F1_star, frac_comp = evaluate_measures(
 #             candidate_pairs=candidate_pairs,
 #             predicted_pairs=predicted_pairs,
@@ -1214,19 +1214,19 @@ def run_single_pipeline(indices, r, b, threshold):
     return PQ, PC, F1, F1_star, frac_comp, precision, recall
 
 def run_lsh_pipeline(indices, r, b):
-    # 1) subset of products for this bootstrap
+    # Step 1 subset of products for this bootstrap
     subset = complete_cleanedData.iloc[indices].reset_index(drop=True)
     n_sub = len(subset)
 
-    # 2) sub-signature matrix (products x hashes)
+    # Step 2 sub-signature matrix (products x hashes)
     sub_signature = signature_matrix[:, indices].T
 
-    # 3) LSH → candidate pairs (in subset index space 0..n_sub-1)
+    # Step 3 LSH → candidate pairs (in subset index space 0..n_sub-1)
     candidate_pairs = lsh(sub_signature, r, b)
     if len(candidate_pairs) == 0:
         return 0.0, 0.0, 0.0, 0.0   # PQ, PC, F1_LSH, frac_comp
 
-    # 4) ground truth duplicate pairs in this subset
+    # Step 4 ground truth duplicate pairs in this subset
     true_pairs = get_true_duplicate_pairs(subset)
 
     # Evaluation of LSH measures
